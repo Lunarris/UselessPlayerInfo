@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
@@ -9,23 +12,23 @@ using UselessPlayerInfo.Objects;
 
 namespace UselessPlayerInfo.Windows;
 
-public class HousingListWindow : Window
+public class HousingListWindow : ThemedWindow
 {
     private readonly Plugin plugin;
+    private readonly ConfirmPopup confirmPopup = new("ConfirmHousingRemovePopup");
+    private readonly EditPopup editPopup = new("EditHousingPopup");
     private string newName = "";
     private string importCode = "";
     private string importName = "";
     private string? importError;
     private int? pendingRemoveIndex;
 
-    private static readonly Vector4 ErrorColor = new Vector4(0.90f, 0.30f, 0.30f, 1f);
-
     public HousingListWindow(Plugin plugin)
         : base("Useless Housing List", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
         SizeConstraints = new WindowSizeConstraints
         {
-            MinimumSize = new Vector2(420, 300),
+            MinimumSize = new Vector2(480, 300),
             MaximumSize = new Vector2(float.MaxValue, float.MaxValue)
         };
 
@@ -34,7 +37,7 @@ public class HousingListWindow : Window
 
     public static void Dispose() { }
 
-    public override void Draw()
+    protected override void DrawContents()
     {
         using var child = ImRaii.Child("SavedLocationsWindow", Vector2.Zero, true);
         if (!child.Success)
@@ -57,80 +60,104 @@ public class HousingListWindow : Window
 
         ImGui.Separator();
         DrawImportRow();
+
+        if (confirmPopup.Draw() is { } removeIndex && removeIndex < plugin.Configuration.HousingLocations.Count)
+        {
+            plugin.Configuration.HousingLocations.RemoveAt(removeIndex);
+            plugin.Configuration.Save();
+        }
+
+        if (editPopup.Draw() is { } edit && edit.Index < plugin.Configuration.HousingLocations.Count)
+        {
+            var location = plugin.Configuration.HousingLocations[edit.Index];
+            location.Name = edit.Name;
+            location.Notes = edit.Notes;
+            plugin.Configuration.Save();
+        }
     }
+
+    private HousingLocation? FindSaved(HousingLocation address)
+        => plugin.Configuration.HousingLocations.FirstOrDefault(saved => saved.SameAddress(address));
 
     private void DrawAddRow()
     {
-
         if (!Housing.CanSaveCurrentLocation())
         {
-            ImGui.TextColored(ErrorColor,"You must be on a plot or in an apartment/private room to save a location.");
-        } 
-        else
+            Widgets.WrappedColored(Widgets.ErrorColor, "You must be on a plot or in an apartment/private room to save a location.");
+            return;
+        }
+
+        ImGui.SetNextItemWidth(200f);
+        ImGui.InputTextWithHint("##NewLocationName", "Name this location...", ref newName, 64);
+
+        ImGui.SameLine();
+
+        using (ImRaii.Disabled(string.IsNullOrWhiteSpace(newName)))
         {
-            ImGui.SetNextItemWidth(200f);
-            ImGui.InputTextWithHint("##NewLocationName", "Name this location...", ref newName, 64);
-
-            ImGui.SameLine();
-
-            var canSave = !string.IsNullOrWhiteSpace(newName) && Housing.CanSaveCurrentLocation();
-
-            using (ImRaii.Disabled(!canSave))
+            if (ImGui.Button("Add Current Location") && TrySaveCurrent(newName, true, out _))
             {
-                if (ImGui.Button("Add Current Location"))
-                {
-                    AddCurrentLocation();
-                }
+                newName = "";
             }
+        }
+
+        if (Housing.GetCurrentLocation() is { } current && FindSaved(current) is { } existing)
+        {
+            Widgets.WrappedColored(Widgets.WarningColor, $"Already saved as \"{existing.Name}\".");
         }
     }
 
     private void DrawImportRow()
     {
-        using (ImRaii.PushFont(UiBuilder.IconFont))
+        if (Widgets.IconButton(FontAwesomeIcon.FileImport, "Import a location from a code"))
         {
-            if (ImGui.Button(FontAwesomeIcon.FileImport.ToIconString()))
+            importCode = "";
+            importName = "";
+            importError = null;
+            ImGui.OpenPopup("ImportLocationPopup");
+        }
+
+        using var popup = ImRaii.Popup("ImportLocationPopup");
+        if (!popup.Success)
+        {
+            return;
+        }
+
+        ImGui.SetNextItemWidth(260f);
+        if (ImGui.InputTextWithHint("##ImportCode", "Paste a location code...", ref importCode, 512))
+        {
+            importError = null;
+
+            if (string.IsNullOrWhiteSpace(importName) && HousingLocation.TryParseCode(importCode, out var parsed) && parsed != null)
             {
-                importCode = "";
-                importName = "";
-                importError = null;
-                ImGui.OpenPopup("ImportLocationPopup");
+                importName = parsed.Name;
             }
         }
 
-        if (ImGui.IsItemHovered())
+        ImGui.SetNextItemWidth(260f);
+        ImGui.InputTextWithHint("##ImportName", "Name this location...", ref importName, 64);
+
+        if (HousingLocation.TryParseCode(importCode, out var preview) && preview != null && FindSaved(preview) is { } existing)
         {
-            ImGui.SetTooltip("Import a location from a code");
+            Widgets.WrappedColored(Widgets.WarningColor, $"Already saved as \"{existing.Name}\".");
         }
 
-        if (ImGui.BeginPopup("ImportLocationPopup"))
+        var canImport = !string.IsNullOrWhiteSpace(importCode) && !string.IsNullOrWhiteSpace(importName);
+
+        using (ImRaii.Disabled(!canImport))
         {
-            ImGui.SetNextItemWidth(220f);
-            ImGui.InputTextWithHint("##ImportCode", "Paste a location code...", ref importCode, 256);
-
-            ImGui.SetNextItemWidth(220f);
-            ImGui.InputTextWithHint("##ImportName", "Name this location...", ref importName, 64);
-
-            var canImport = !string.IsNullOrWhiteSpace(importCode) && !string.IsNullOrWhiteSpace(importName);
-
-            using (ImRaii.Disabled(!canImport))
+            if (ImGui.Button("Import"))
             {
-                if (ImGui.Button("Import"))
+                ImportLocation();
+                if (importError == null)
                 {
-                    ImportLocation();
-                    if (importError == null)
-                    {
-                        ImGui.CloseCurrentPopup();
-                    }
+                    ImGui.CloseCurrentPopup();
                 }
             }
+        }
 
-            if (importError != null)
-            {
-                ImGui.TextColored(new Vector4(0.90f, 0.30f, 0.30f, 1f), importError);
-            }
-
-            ImGui.EndPopup();
+        if (importError != null)
+        {
+            Widgets.WrappedColored(Widgets.ErrorColor, importError);
         }
     }
 
@@ -154,7 +181,8 @@ public class HousingListWindow : Window
             return;
         }
 
-        location.Name = importName;
+        location.Name = importName.Trim();
+        location.TerritoryId = Housing.ToWardTerritory(location.TerritoryId);
         plugin.Configuration.HousingLocations.Add(location);
         plugin.Configuration.Save();
 
@@ -173,52 +201,77 @@ public class HousingListWindow : Window
             return;
         }
 
-        if (!ImGui.BeginTable("SavedLocationsTable", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.SizingStretchProp))
+        if (!ImGui.BeginTable("SavedLocationsTable", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.Borders | ImGuiTableFlags.SizingStretchProp))
         {
             return;
         }
 
         ImGui.TableSetupColumn("Name", ImGuiTableColumnFlags.WidthStretch, 0);
         ImGui.TableSetupColumn("Location", ImGuiTableColumnFlags.WidthStretch, 0);
-        ImGui.TableSetupColumn("##Share", ImGuiTableColumnFlags.WidthFixed, 30f, 0);
-        ImGui.TableSetupColumn("##Actions", ImGuiTableColumnFlags.WidthFixed, 60f, 0);
+        var actionsWidth = Widgets.IconButtonsWidth(FontAwesomeIcon.Copy, FontAwesomeIcon.MapMarkedAlt, FontAwesomeIcon.Pen, FontAwesomeIcon.Trash);
+        ImGui.TableSetupColumn("##Actions", ImGuiTableColumnFlags.WidthFixed, actionsWidth, 0);
         ImGui.TableHeadersRow();
 
-        for (var i = 0; i < locations.Count; i++)
+        var confirm = plugin.Configuration.ConfirmHousingRemove;
+
+        foreach (var i in DisplayOrder(locations).ToList())
         {
             var loc = locations[i];
+            using var id = ImRaii.PushId(i);
 
             ImGui.TableNextRow();
 
             ImGui.TableNextColumn();
             ImGui.AlignTextToFramePadding();
-            ImGui.TextUnformatted(loc.Name);
-
-            ImGui.TableNextColumn();
-            ImGui.AlignTextToFramePadding();
-            ImGui.TextUnformatted(DescribeLocation(loc));
-
-            ImGui.TableNextColumn();
-            using (ImRaii.PushId(i))
+            ImGui.TextWrapped(loc.Name);
+            if (!string.IsNullOrEmpty(loc.Notes))
             {
-                using (ImRaii.PushFont(UiBuilder.IconFont))
+                if (plugin.Configuration.ShowHousingNotes)
                 {
-                    if (ImGui.SmallButton(FontAwesomeIcon.Copy.ToIconString()))
+                    using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
                     {
-                        ImGui.SetClipboardText(loc.ToCode());
+                        ImGui.TextWrapped(loc.Notes);
                     }
                 }
-
-                if (ImGui.IsItemHovered())
+                else if (ImGui.IsItemHovered())
                 {
-                    ImGui.SetTooltip("Copy shareable code");
+                    ImGui.SetTooltip(loc.Notes);
                 }
             }
 
             ImGui.TableNextColumn();
-            using (ImRaii.PushId(i))
+            ImGui.AlignTextToFramePadding();
+            ImGui.TextWrapped(Housing.Describe(loc));
+
+            ImGui.TableNextColumn();
+            if (Widgets.IconButton(FontAwesomeIcon.Copy, "Copy shareable code"))
             {
-                if (ImGui.SmallButton("Remove"))
+                ImGui.SetClipboardText(loc.ToCode());
+            }
+
+            ImGui.SameLine();
+            using (ImRaii.Disabled(!Housing.CanShowOnMap(loc)))
+            {
+                if (Widgets.IconButton(FontAwesomeIcon.MapMarkedAlt, "Show on map"))
+                {
+                    Housing.ShowOnMap(loc);
+                }
+            }
+
+            ImGui.SameLine();
+            if (Widgets.IconButton(FontAwesomeIcon.Pen, "Rename or add notes"))
+            {
+                editPopup.Open(i, loc.Name, loc.Notes);
+            }
+
+            ImGui.SameLine();
+            if (Widgets.RemoveButton(confirm))
+            {
+                if (confirm)
+                {
+                    confirmPopup.Open(i, $"Remove \"{loc.Name}\"?");
+                }
+                else
                 {
                     pendingRemoveIndex = i;
                 }
@@ -235,50 +288,37 @@ public class HousingListWindow : Window
         }
     }
 
-    private void AddCurrentLocation()
+    private IEnumerable<int> DisplayOrder(List<HousingLocation> locations)
     {
-        var territoryId = Housing.GetOriginalHouseTerritoryTypeId() ?? Plugin.ClientState.TerritoryType;
-        var coords = Housing.GetCurrentHousingCoords();
-        var worldId = Plugin.ObjectTable.LocalPlayer?.CurrentWorld.RowId ?? 0;
-
-        if (coords == null) {
-            Plugin.Log.Warning(
-                $"Could not determine housing coordinates while saving location '{newName}'. " +
-                $"TerritoryId: {territoryId}, WorldId: {worldId}");
-        }
-
-        plugin.Configuration.HousingLocations.Add(new HousingLocation
+        var indexes = Enumerable.Range(0, locations.Count);
+        return plugin.Configuration.HousingSort switch
         {
-            Name = newName,
-            TerritoryId = territoryId,
-            WorldId = worldId,
-            Ward = coords?.Ward ?? 0,
-            Plot = coords?.Plot ?? 0,
-            Room = coords?.Room ?? 0,
-        });
-
-        Plugin.Log.Debug($"Saving configuration with {plugin.Configuration.HousingLocations.Count.ToString()} saved locations.");
-
-        plugin.Configuration.Save();
-        newName = "";
+            ListSort.Name => indexes.OrderBy(i => locations[i].Name, StringComparer.CurrentCultureIgnoreCase),
+            ListSort.Location => indexes.OrderBy(i => locations[i].WorldId).ThenBy(i => locations[i].TerritoryId)
+                .ThenBy(i => locations[i].Ward).ThenBy(i => locations[i].Plot).ThenBy(i => locations[i].Room),
+            _ => indexes,
+        };
     }
 
-    private static string DescribeLocation(HousingLocation loc)
+    public bool TrySaveCurrent(string name, bool allowDuplicate, out string message)
     {
-        if (!Plugin.DataManager.GetExcelSheet<TerritoryType>().TryGetRow(loc.TerritoryId, out var territoryRow))
+        var location = Housing.GetCurrentLocation();
+        if (location == null)
         {
-            return "Unknown location";
+            message = "You must be on a plot or in an apartment/private room to save a location.";
+            return false;
         }
 
-        var name = territoryRow.PlaceName.Value.Name.ToString();
-
-        if (loc.WorldId != 0 && Plugin.DataManager.GetExcelSheet<World>().TryGetRow(loc.WorldId, out var worldRow))
+        if (!allowDuplicate && FindSaved(location) is { } existing)
         {
-            name += $" ({worldRow.Name})";
+            message = $"This location is already saved as \"{existing.Name}\".";
+            return false;
         }
 
-        var coords = Housing.DescribeCoords(loc.Ward, loc.Plot, loc.Room);
-
-        return coords == null ? name : $"{name}, {coords}";
+        location.Name = string.IsNullOrWhiteSpace(name) ? Housing.Describe(location) : name.Trim();
+        plugin.Configuration.HousingLocations.Add(location);
+        plugin.Configuration.Save();
+        message = $"Saved \"{location.Name}\" ({Housing.Describe(location)}).";
+        return true;
     }
 }

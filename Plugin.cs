@@ -1,15 +1,14 @@
-﻿using System.Linq;
+using System.Linq;
 using System.Net.Http;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Game.ClientState.Conditions;
 using Dalamud.Game.Command;
 using Dalamud.Game.Gui;
-using Dalamud.Game.Text;
 using Dalamud.Interface.ImGuiNotification;
 using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
-using Lumina.Excel.Sheets;
 using UselessPlayerInfo.Functions;
 using UselessPlayerInfo.Windows;
 using UselessPlayerInfo.Objects;
@@ -28,12 +27,19 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
     [PluginService] internal static IChatGui ChatGui { get; private set; } = null!;
-    [PluginService] internal static IToastGui ToastGui { get; private set; } = null!;
+    [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
+    [PluginService] internal static ITargetManager TargetManager { get; private set; } = null!;
+    [PluginService] internal static IFramework Framework { get; private set; } = null!;
+    [PluginService] internal static ICondition Condition { get; private set; } = null!;
 
     private const string MainWindowCMD = "/uselessinfo";
+    private const string SettingsWindowCMD = "/ulsettings";
     private const string JobWindowCMD = "/jobinfo";
-    private const string WhereAmI = "/whereami";
     private const string HousingListCMD = "/housinglist";
+    private const string SpotListCMD = "/savedspots";
+    private const string SaveHouseCMD = "/savehouse";
+    private const string SaveSpotCMD = "/savespot";
+    private const string PeeperListCMD = "/peep";
 
     public Configuration Configuration { get; init; }
 
@@ -42,23 +48,50 @@ public sealed class Plugin : IDalamudPlugin
 
     private HousingListWindow HousingListWindow { get; init; }
 
+    private SpotListWindow SpotListWindow { get; init; }
+
+    private PeeperList PeeperListWindow { get; init; }
+
+    private PeeperStatus PeeperStatusWindow { get; init; }
+
+    internal TargetWatch TargetWatch { get; init; }
+
     private MainWindow MainWindow { get; init; }
+
+    private SettingsWindow SettingsWindow { get; init; }
 
     public Plugin()
     {
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
+        MoveHousesToWards();
 
         JobWindow = new JobWindow(this);
         HousingListWindow = new HousingListWindow(this);
+        SpotListWindow = new SpotListWindow(this);
+        TargetWatch = new TargetWatch(Configuration);
+        PeeperListWindow = new PeeperList(this);
+        PeeperStatusWindow = new PeeperStatus();
         MainWindow = new MainWindow(this);
+        SettingsWindow = new SettingsWindow(this);
 
         WindowSystem.AddWindow(JobWindow);
         WindowSystem.AddWindow(HousingListWindow);
+        WindowSystem.AddWindow(SpotListWindow);
+        WindowSystem.AddWindow(PeeperListWindow);
+        WindowSystem.AddWindow(PeeperStatusWindow);
         WindowSystem.AddWindow(MainWindow);
+        WindowSystem.AddWindow(SettingsWindow);
+
+        ApplySettings();
 
         CommandManager.AddHandler(MainWindowCMD, new CommandInfo(OnCommand)
         {
             HelpMessage = "Opens the Very Simple Main Window for this plugin."
+        });
+
+        CommandManager.AddHandler(SettingsWindowCMD, new CommandInfo(OnCommand)
+        {
+            HelpMessage = "Opens the settings for this plugin."
         });
 
         CommandManager.AddHandler(JobWindowCMD, new CommandInfo(OnCommand)
@@ -66,102 +99,161 @@ public sealed class Plugin : IDalamudPlugin
             HelpMessage = "Opens the Locations Window for displaying all the player's Jobs and their corresponding levels."
         });
 
-        CommandManager.AddHandler(WhereAmI, new CommandInfo(OnCommand)
-        {
-            HelpMessage = "Prints your current location information to chat."
-        });
-
         CommandManager.AddHandler(HousingListCMD, new CommandInfo(OnCommand)
         {
             HelpMessage = "Opens the Saved Houses Window for adding and removing saved Houses and Apartments/Chambers."
         });
 
-        // Tell the UI system that we want our windows to be drawn throught he window system
-        PluginInterface.UiBuilder.Draw += WindowSystem.Draw;
+        CommandManager.AddHandler(SpotListCMD, new CommandInfo(OnCommand)
+        {
+            HelpMessage = "Opens the Saved Spots Window for saving and sharing open-world map locations."
+        });
 
-        // Adds another button doing the same but for the main ui of the plugin
+        CommandManager.AddHandler(PeeperListCMD, new CommandInfo(OnCommand)
+        {
+            HelpMessage = "Opens the Peeper List Window, listing players who have targeted you this session."
+        });
+
+        CommandManager.AddHandler(SaveHouseCMD, new CommandInfo(OnCommand)
+        {
+            HelpMessage = "Saves the house, apartment or room you're at. Usage: /savehouse [name]"
+        });
+
+        CommandManager.AddHandler(SaveSpotCMD, new CommandInfo(OnCommand)
+        {
+            HelpMessage = "Saves the spot you're standing on. Usage: /savespot [name]"
+        });
+
+        PluginInterface.UiBuilder.Draw += DrawUi;
+
         PluginInterface.UiBuilder.OpenMainUi += ToggleMainWindowUi;
+        PluginInterface.UiBuilder.OpenConfigUi += ToggleSettingsWindowUi;
 
-        // Add a simple message to the log with level set to information
-        // Use /xllog to open the log window in-game
-        // Example Output: 00:57:54.959 | INF | [SamplePlugin] ===A cool log message from Sample Plugin===
         Log.Information($"UselessPlayerInfo has been loaded.");
     }
 
     public void Dispose()
     {
-        // Unregister all actions to not leak anythign during disposal of plugin
-        PluginInterface.UiBuilder.Draw -= WindowSystem.Draw;
+        PluginInterface.UiBuilder.Draw -= DrawUi;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMainWindowUi;
+        PluginInterface.UiBuilder.OpenConfigUi -= ToggleSettingsWindowUi;
 
         WindowSystem.RemoveAllWindows();
 
         JobWindow.Dispose();
+        PeeperListWindow.Dispose();
+        TargetWatch.Dispose();
 
         CommandManager.RemoveHandler(MainWindowCMD);
+        CommandManager.RemoveHandler(SettingsWindowCMD);
         CommandManager.RemoveHandler(JobWindowCMD);
         CommandManager.RemoveHandler(HousingListCMD);
-        CommandManager.RemoveHandler(WhereAmI);
+        CommandManager.RemoveHandler(SpotListCMD);
+        CommandManager.RemoveHandler(PeeperListCMD);
+        CommandManager.RemoveHandler(SaveHouseCMD);
+        CommandManager.RemoveHandler(SaveSpotCMD);
+    }
+
+    private void DrawUi()
+    {
+        if (Configuration.HideInCombat && Condition[ConditionFlag.InCombat])
+        {
+            return;
+        }
+
+        Theme.Update(SettingsWindow.Preview ?? Configuration);
+        WindowSystem.Draw();
+    }
+
+    public void ApplySettings()
+    {
+        const ImGuiWindowFlags lockFlags = ImGuiWindowFlags.NoMove | ImGuiWindowFlags.NoResize;
+
+        foreach (var window in WindowSystem.Windows)
+        {
+            window.RespectCloseHotkey = Configuration.CloseWithEscape;
+
+            if (window == SettingsWindow)
+            {
+                continue;
+            }
+
+            window.Flags = Configuration.LockWindows ? window.Flags | lockFlags : window.Flags & ~lockFlags;
+        }
+
+        PluginInterface.UiBuilder.DisableCutsceneUiHide = !Configuration.HideInCutscenes;
+        PluginInterface.UiBuilder.DisableGposeUiHide = !Configuration.HideInGpose;
     }
 
     private void OnCommand(string command, string args)
     {
-
         switch (command)
         {
             case MainWindowCMD:
-                // In response to the slash command, toggle the display status of our main ui
                 MainWindow.Toggle();
                 break;
-            case JobWindowCMD:
-                // In response to the slash command, toggle the display status of our main ui
-                JobWindow.Toggle();
+            case SettingsWindowCMD:
+                SettingsWindow.Toggle();
                 break;
-            case WhereAmI:
-                PrintWhereAmI();
+            case JobWindowCMD:
+                JobWindow.Toggle();
                 break;
             case HousingListCMD:
                 HousingListWindow.Toggle();
                 break;
+            case SpotListCMD:
+                SpotListWindow.Toggle();
+                break;
+            case PeeperListCMD:
+                PeeperListWindow.Toggle();
+                break;
+            case SaveHouseCMD:
+                PrintSaveResult(HousingListWindow.TrySaveCurrent(args, false, out var houseMessage), houseMessage);
+                break;
+            case SaveSpotCMD:
+                PrintSaveResult(SpotListWindow.TrySaveCurrent(args, false, out var spotMessage), spotMessage);
+                break;
             default:
                 break;
         }
-
     }
 
-    private static void PrintWhereAmI()
+    private static void PrintSaveResult(bool saved, string message)
     {
-        var message = "";
-
-        var territoryId = Housing.GetOriginalHouseTerritoryTypeId() ?? Plugin.ClientState.TerritoryType;
-
-        if (Plugin.DataManager.GetExcelSheet<TerritoryType>().TryGetRow(territoryId, out var territoryRow))
+        if (saved)
         {
-            if(Housing.GetLocationSuffix() != null)
-            {
-                message = $"You are currently in \"{territoryRow.PlaceName.Value.Name}, {Housing.GetLocationSuffix()}\"";
-            }
-            else
-            {
-                message = $"You are currently in \"{territoryRow.PlaceName.Value.Name}\"";
-            }
-        } 
+            ChatGui.Print(message);
+        }
         else
         {
-            message = "Invalid territory.";    
+            ChatGui.PrintError(message);
+        }
+    }
+
+    private void MoveHousesToWards()
+    {
+        var changed = false;
+        foreach (var location in Configuration.HousingLocations)
+        {
+            var wardId = Housing.ToWardTerritory(location.TerritoryId);
+            if (wardId != location.TerritoryId)
+            {
+                location.TerritoryId = wardId;
+                changed = true;
+            }
         }
 
-        ChatGui.Print(new XivChatEntry
+        if (changed)
         {
-            Message = $"{message}",
-            Type = XivChatType.SystemMessage
-        });
-
-        ToastGui.ShowNormal($"{message}");
+            Configuration.Save();
+        }
     }
 
     public void ToggleMainWindowUi() => MainWindow.Toggle();
+    public void ToggleSettingsWindowUi() => SettingsWindow.Toggle();
     public void ToggleJobWindowUi() => JobWindow.Toggle();
     public void ToggleHousingListWindowUI() => HousingListWindow.Toggle();
-
+    public void ToggleSpotListWindowUi() => SpotListWindow.Toggle();
+    public void TogglePeeperListWindowUi() => PeeperListWindow.Toggle();
+    internal void ShowPeeperStatus(Watcher watcher) => PeeperStatusWindow.Show(watcher);
 }

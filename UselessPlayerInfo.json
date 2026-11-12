@@ -2,7 +2,7 @@
   "Author": "Lunarris",
   "Name": "Useless Player Info",
   "Punchline": "Ever wanted to see some useless info for no reason?.",
-  "Description": "A simple program that shows some useless info on your character's jobs and location info. More coming soon most likely.",
+  "Description": "A simple-ish plugin that shows character info, weather, location, and your job info. With various other small features such as saving a location or house address.",
   "ApplicableVersion": "any",
   "IconUrl": "https://raw.githubusercontent.com/Lunarris/UselessPlayerInfo/main/images/icon.png",
   "Tags": [

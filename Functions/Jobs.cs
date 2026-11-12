@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using Lumina.Excel.Sheets;
 
 namespace UselessPlayerInfo.Functions;
@@ -17,33 +18,71 @@ public enum JobRole
 
 internal static class Jobs
 {
-    // FFXIV Jobs, the starter classes are excluded since they become superceded
-    public static readonly (string Abbrev, uint Id, JobRole Role)[] All = new (string, uint, JobRole)[]
+    private const byte RoleTank = 1;
+    private const byte RoleMelee = 2;
+    private const byte RoleRanged = 3;
+    private const byte RoleHealer = 4;
+    private const byte PrimaryStatDexterity = 2;
+    private const byte PrimaryStatIntelligence = 4;
+    private const uint CategoryDiscipleOfLand = 32;
+    private const uint CategoryDiscipleOfHand = 33;
+
+    private static IReadOnlyList<(string Abbrev, uint Id, JobRole Role)>? all;
+    public static IReadOnlyList<(string Abbrev, uint Id, JobRole Role)> All => all ??= BuildJobList();
+
+    private static List<(string Abbrev, uint Id, JobRole Role)> BuildJobList()
     {
-        ("PLD", 19, JobRole.Tank), ("WAR", 21, JobRole.Tank), ("DRK", 32, JobRole.Tank), ("GNB", 37, JobRole.Tank),
+        var jobs = new List<(string Abbrev, uint Id, JobRole Role, byte Priority)>();
 
-        ("WHM", 24, JobRole.Healer), ("SCH", 28, JobRole.Healer), ("AST", 33, JobRole.Healer), ("SGE", 40, JobRole.Healer),
+        foreach (var classJob in Plugin.DataManager.GetExcelSheet<ClassJob>())
+        {
+            var role = GetRole(classJob);
+            if (role == null)
+            {
+                continue;
+            }
 
-        ("MNK", 20, JobRole.Melee), ("DRG", 22, JobRole.Melee), ("NIN", 30, JobRole.Melee),
-        ("SAM", 34, JobRole.Melee), ("RPR", 39, JobRole.Melee), ("VPR", 41, JobRole.Melee), ("BST", 43, JobRole.LimitedJob),
+            jobs.Add((classJob.Abbreviation.ToString(), classJob.RowId, role.Value, classJob.UIPriority));
+        }
 
-        ("BRD", 23, JobRole.PhysicalRanged), ("MCH", 31, JobRole.PhysicalRanged), ("DNC", 38, JobRole.PhysicalRanged),
+        return jobs.OrderBy(job => job.Priority).Select(job => (job.Abbrev, job.Id, job.Role)).ToList();
+    }
 
-        ("BLM", 25, JobRole.MagicalRanged), ("SMN", 27, JobRole.MagicalRanged),
-        ("RDM", 35, JobRole.MagicalRanged), ("BLU", 36, JobRole.LimitedJob), ("PCT", 42, JobRole.MagicalRanged), // include new jobs if applicable
+    private static JobRole? GetRole(ClassJob classJob)
+    {
+        switch (classJob.ClassJobCategory.RowId)
+        {
+            case CategoryDiscipleOfHand:
+                return JobRole.Hand;
+            case CategoryDiscipleOfLand:
+                return JobRole.Land;
+        }
 
-        ("CRP", 8, JobRole.Hand), ("BSM", 9, JobRole.Hand), ("ARM", 10, JobRole.Hand), ("GSM", 11, JobRole.Hand),
-        ("LTW", 12, JobRole.Hand), ("WVR", 13, JobRole.Hand), ("ALC", 14, JobRole.Hand), ("CUL", 15, JobRole.Hand),
+        if (classJob.JobIndex == 0)
+        {
+            return null;
+        }
 
-        ("MIN", 16, JobRole.Land), ("BTN", 17, JobRole.Land), ("FSH", 18, JobRole.Land)
-    };
+        if (classJob.IsLimitedJob)
+        {
+            return JobRole.LimitedJob;
+        }
 
-    // Retrieves the job icons based off the base id + the job ID. 
+        return classJob.Role switch
+        {
+            RoleTank => JobRole.Tank,
+            RoleHealer => JobRole.Healer,
+            RoleMelee => JobRole.Melee,
+            RoleRanged when classJob.PrimaryStat == PrimaryStatDexterity => JobRole.PhysicalRanged,
+            RoleRanged when classJob.PrimaryStat == PrimaryStatIntelligence => JobRole.MagicalRanged,
+            _ => null,
+        };
+    }
+
     private const uint JobIconBaseId = 62100;
 
     public static uint GetIconId(uint jobId) => JobIconBaseId + jobId;
 
-    // Returns the local player's unlocked jobs and their levels, but skips anything not unlocked or still level 0.
     public static List<(string Abbrev, int Level)> GetUnlockedJobLevels()
     {
         var result = new List<(string Abbrev, int Level)>();

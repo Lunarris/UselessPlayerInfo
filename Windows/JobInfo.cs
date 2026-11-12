@@ -1,4 +1,7 @@
+using System;
+using System.Linq;
 using System.Numerics;
+using FFXIVClientStructs.FFXIV.Client.Game.UI;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Textures;
 using Dalamud.Interface.Utility;
@@ -9,7 +12,7 @@ using UselessPlayerInfo.Functions;
 
 namespace UselessPlayerInfo.Windows;
 
-public class JobWindow : Window
+public class JobWindow : ThemedWindow
 {
     private const float IconSize = 24f;
 
@@ -26,10 +29,8 @@ public class JobWindow : Window
     };
 
     private readonly Plugin plugin;
+    private bool selectCurrentRole;
 
-    // We give this window a hidden ID using ##.
-    // The user will see "My Amazing Window" as window title,
-    // but for ImGui the ID is "My Amazing Window##With a hidden ID"
     public JobWindow(Plugin plugin)
         : base("Useless Jobs Info", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
     {
@@ -44,21 +45,14 @@ public class JobWindow : Window
 
     public static void Dispose() { }
 
-    public override void Draw()
-    {
+    public override void OnOpen() => selectCurrentRole = plugin.Configuration.OpenCurrentRoleTab;
 
-        // Normally a BeginChild() would have to be followed by an unconditional EndChild(),
-        // ImRaii takes care of this after the scope ends.
-        // This works for all ImGui functions that require specific handling, examples are BeginTable() or Indent().
+    protected override void DrawContents()
+    {
         using (var child = ImRaii.Child("JobInfoWindow", Vector2.Zero, true))
         {
-            // Check if this child is drawing
             if (child.Success)
             {
-
-                // Example for other services that Dalamud provides.
-                // ClientState provides a wrapper filled with information about the local player object and client.
-
                 var localPlayer = Plugin.ObjectTable.LocalPlayer;
                 if (localPlayer == null)
                 {
@@ -80,35 +74,71 @@ public class JobWindow : Window
                 ImGui.Separator();
                 ImGui.Spacing();
 
+                DrawMaxLevelSummary();
+                ImGui.Spacing();
+
+                var currentRole = Jobs.All.Where(j => j.Id == localPlayer.ClassJob.RowId).Select(j => (JobRole?)j.Role).FirstOrDefault();
+
                 if (ImGui.BeginTabBar("JobRoleTabs", ImGuiTabBarFlags.None))
                 {
                     foreach (var (role, label, color) in RoleTabs)
                     {
-                        if (ImGui.BeginTabItem(label, ImGuiTabItemFlags.None))
+                        var flags = selectCurrentRole && role == currentRole ? ImGuiTabItemFlags.SetSelected : ImGuiTabItemFlags.None;
+                        if (ImGui.BeginTabItem(label, flags))
                         {
-                            DrawRoleTab(role, color);
+                            DrawRoleTab(role, color, plugin.Configuration.HideLockedJobs, plugin.Configuration.ShowExperienceBars);
                             ImGui.EndTabItem();
                         }
                     }
 
                     ImGui.EndTabBar();
                 }
+
+                selectCurrentRole = false;
             }
-
-
         }
-
     }
 
-    private static void DrawRoleTab(JobRole role, Vector4 color)
+    private static readonly Vector4 MaxLevelColor = new(1.00f, 0.82f, 0.30f, 1f);
+
+    private static unsafe int GetLevelCap()
+        => 50 + 10 * PlayerState.Instance()->MaxExpansion;
+
+    private static void DrawMaxLevelSummary()
+    {
+        var cap = GetLevelCap();
+        var total = 0;
+        var capped = 0;
+
+        foreach (var (_, id, role) in Jobs.All)
+        {
+            if (role == JobRole.LimitedJob)
+            {
+                continue;
+            }
+
+            total++;
+            if (GetJobLevel(id) >= cap)
+            {
+                capped++;
+            }
+        }
+
+        ImGui.TextColored(MaxLevelColor, $"{capped} / {total} jobs at max level ({cap})");
+    }
+
+    private static void DrawRoleTab(JobRole role, Vector4 color, bool hideLocked, bool showBars)
     {
         ImGui.Spacing();
 
-        if (ImGui.BeginTable($"JobTable_{role}", 3, ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingFixedFit))
+        var cap = GetLevelCap();
+
+        if (ImGui.BeginTable($"JobTable_{role}", 4, ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingFixedFit))
         {
             ImGui.TableSetupColumn("##Icon", ImGuiTableColumnFlags.WidthFixed, IconSize, 0);
             ImGui.TableSetupColumn("Job", ImGuiTableColumnFlags.WidthFixed, 50f, 0);
             ImGui.TableSetupColumn("Level", ImGuiTableColumnFlags.WidthFixed, 40f, 0);
+            ImGui.TableSetupColumn("Experience", ImGuiTableColumnFlags.WidthStretch, 0);
 
             foreach (var (abbrev, id, jobRole) in Jobs.All)
             {
@@ -116,6 +146,14 @@ public class JobWindow : Window
                 {
                     continue;
                 }
+
+                var level = GetJobLevel(id);
+                if (hideLocked && level == 0)
+                {
+                    continue;
+                }
+
+                var isCapped = role != JobRole.LimitedJob && level >= cap;
 
                 ImGui.TableNextRow();
 
@@ -128,15 +166,52 @@ public class JobWindow : Window
 
                 ImGui.TableNextColumn();
                 ImGui.AlignTextToFramePadding();
-                var level = GetJobLevel(id);
-                ImGui.TextUnformatted(level > 0 ? level.ToString() : "-");
+                if (isCapped)
+                {
+                    ImGui.TextColored(MaxLevelColor, level.ToString());
+                }
+                else
+                {
+                    ImGui.TextUnformatted(level > 0 ? level.ToString() : "-");
+                }
 
+                ImGui.TableNextColumn();
+                ImGui.AlignTextToFramePadding();
+                if (isCapped)
+                {
+                    ImGui.TextColored(MaxLevelColor, "Max level");
+                }
+                else if (level > 0)
+                {
+                    DrawExperience(id, level, showBars);
+                }
             }
 
             ImGui.EndTable();
         }
 
         ImGui.Spacing();
+    }
+
+    private static void DrawExperience(uint jobId, int level, bool showBar)
+    {
+        if (!Plugin.DataManager.GetExcelSheet<ParamGrow>().TryGetRow((uint)level, out var grow) || grow.ExpToNext <= 0
+            || !Plugin.DataManager.GetExcelSheet<ClassJob>().TryGetRow(jobId, out var classJob))
+        {
+            return;
+        }
+
+        var experience = Plugin.PlayerState.GetClassJobExperience(classJob);
+        var fraction = Math.Clamp((float)experience / grow.ExpToNext, 0f, 1f);
+        var text = $"{experience:N0} / {grow.ExpToNext:N0}";
+        if (showBar)
+        {
+            ImGui.ProgressBar(fraction, new Vector2(-1, 0), text);
+        }
+        else
+        {
+            ImGui.TextUnformatted(text);
+        }
     }
 
     private static void DrawJobIcon(uint jobId, float size)
@@ -154,17 +229,4 @@ public class JobWindow : Window
 
         return Plugin.PlayerState.GetClassJobLevel(classJob);
     }
-
-/*
-    private static int GetJobExperience(uint jobId)
-    {
-        if (!Plugin.DataManager.GetExcelSheet<ClassJob>().TryGetRow(jobId, out var classJob))
-        {
-            return 0;
-        }
-
-        return Plugin.PlayerState.GetClassJobExperience(classJob);
-    }
-    */
-
 }

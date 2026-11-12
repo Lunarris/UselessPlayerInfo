@@ -1,5 +1,11 @@
+using System.Collections.Generic;
+using System.Linq;
+using System.Numerics;
+using Dalamud.Game.Text.SeStringHandling.Payloads;
+using Dalamud.Utility;
 using FFXIVClientStructs.FFXIV.Client.Game;
-using UselessPlayerInfo;
+using Lumina.Excel.Sheets;
+using UselessPlayerInfo.Objects;
 
 namespace UselessPlayerInfo.Functions;
 
@@ -35,18 +41,15 @@ internal static class Housing
             suffix += $", Plot {plot + 1}";
         }
 
-        Plugin.Log.Debug($"Current location: {suffix}");
         return suffix;
     }
 
-    // True while inside a house, apartment, or private room, where map coordinates are meaningless.
     public static unsafe bool IsInsideHousing()
     {
         var housingManager = HousingManager.Instance();
         return housingManager != null && housingManager->IsInside();
     }
 
-    //Retrieve the original outdoor area type instead of the generic interior instance.
     public static unsafe uint? GetOriginalHouseTerritoryTypeId()
     {
         var housingManager = HousingManager.Instance();
@@ -56,6 +59,76 @@ internal static class Housing
         }
 
         return HousingManager.GetOriginalHouseTerritoryTypeId();
+    }
+
+    private const uint HousingWardIntendedUse = 13;
+    private static Dictionary<string, uint>? wardsByArtFolder;
+
+    public static uint ToWardTerritory(uint territoryId)
+    {
+        var sheet = Plugin.DataManager.GetExcelSheet<TerritoryType>();
+        if (!sheet.TryGetRow(territoryId, out var row) || row.TerritoryIntendedUse.RowId == HousingWardIntendedUse)
+        {
+            return territoryId;
+        }
+
+        if (wardsByArtFolder == null)
+        {
+            wardsByArtFolder = new Dictionary<string, uint>();
+            foreach (var ward in sheet.Where(t => t.TerritoryIntendedUse.RowId == HousingWardIntendedUse))
+            {
+                if (ArtFolder(ward.Bg.ToString()) is { } folder)
+                {
+                    wardsByArtFolder.TryAdd(folder, ward.RowId);
+                }
+            }
+        }
+
+        return ArtFolder(row.Bg.ToString()) is { } interiorFolder && wardsByArtFolder.TryGetValue(interiorFolder, out var wardId)
+            ? wardId
+            : territoryId;
+    }
+
+    private static string? ArtFolder(string bg)
+    {
+        var parts = bg.Split('/');
+        return parts.Length >= 2 ? $"{parts[0]}/{parts[1]}" : null;
+    }
+
+    public static HousingLocation? GetCurrentLocation()
+    {
+        if (!CanSaveCurrentLocation() || GetCurrentHousingCoords() is not { } coords)
+        {
+            return null;
+        }
+
+        return new HousingLocation
+        {
+            TerritoryId = ToWardTerritory(GetOriginalHouseTerritoryTypeId() ?? Plugin.ClientState.TerritoryType),
+            WorldId = Plugin.ObjectTable.LocalPlayer?.CurrentWorld.RowId ?? 0,
+            Ward = coords.Ward,
+            Plot = coords.Plot,
+            Room = coords.Room,
+        };
+    }
+
+    public static string Describe(HousingLocation loc)
+    {
+        if (!Plugin.DataManager.GetExcelSheet<TerritoryType>().TryGetRow(loc.TerritoryId, out var territoryRow))
+        {
+            return "Unknown location";
+        }
+
+        var name = territoryRow.PlaceName.Value.Name.ToString();
+
+        if (loc.WorldId != 0 && Plugin.DataManager.GetExcelSheet<World>().TryGetRow(loc.WorldId, out var worldRow))
+        {
+            name += $" ({worldRow.Name})";
+        }
+
+        var coords = DescribeCoords(loc.Ward, loc.Plot, loc.Room);
+
+        return coords == null ? name : $"{name}, {coords}";
     }
 
     public static unsafe (int Ward, int Plot, int Room)? GetCurrentHousingCoords()
@@ -73,7 +146,6 @@ internal static class Housing
         return (ward, plot, room);
     }
 
-    // Check for if on a housing plot or in a building/room
     public static unsafe bool CanSaveCurrentLocation()
     {
         var housingManager = HousingManager.Instance();
@@ -91,6 +163,43 @@ internal static class Housing
         }
 
         return plot >= 0;
+    }
+
+    private const int MainApartmentMarker = 60;
+    private const int SubdivisionApartmentMarker = 61;
+
+    public static bool CanShowOnMap(HousingLocation location)
+        => GetMapMarker(location) != null;
+
+    public static bool ShowOnMap(HousingLocation location)
+    {
+        if (GetMapMarker(location) is not { } marker)
+        {
+            return false;
+        }
+
+        var map = marker.Map.Value;
+        var coords = MapUtil.WorldToMap(new Vector2(marker.X, marker.Z), map);
+        return Plugin.GameGui.OpenMapWithMapLink(new MapLinkPayload(location.TerritoryId, map.RowId, coords.X, coords.Y));
+    }
+
+    private static HousingMapMarkerInfo? GetMapMarker(HousingLocation location)
+    {
+        var index = location.Plot switch
+        {
+            ApartmentMainDivisionPlot => MainApartmentMarker,
+            ApartmentSubdivisionPlot => SubdivisionApartmentMarker,
+            >= 0 and < MainApartmentMarker => location.Plot,
+            _ => -1,
+        };
+
+        if (index < 0 || !Plugin.DataManager.GetSubrowExcelSheet<HousingMapMarkerInfo>().TryGetRow(location.TerritoryId, out var markers)
+                      || index >= markers.Count)
+        {
+            return null;
+        }
+
+        return markers[index];
     }
 
     public static string? DescribeCoords(int ward, int plot, int room)

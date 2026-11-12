@@ -1,5 +1,5 @@
-using Dalamud.Configuration;
 using System;
+using System.Globalization;
 using System.Text;
 
 namespace UselessPlayerInfo.Objects;
@@ -7,37 +7,46 @@ namespace UselessPlayerInfo.Objects;
 [Serializable]
 public class WorldArea
 {
-    public string Description { get; set; } = "";
-    public int xCord { get; set; }
-    public int yCord { get; set; }
+    public string Name { get; set; } = "";
+    public string Notes { get; set; } = "";
+    public uint TerritoryId { get; set; }
+    public uint MapId { get; set; }
+    public float X { get; set; }
+    public float Y { get; set; }
 
     public string ToCode()
     {
-        var raw = $"{Description}:{xCord}:{yCord}";
+        var x = X.ToString("0.0", CultureInfo.InvariantCulture);
+        var y = Y.ToString("0.0", CultureInfo.InvariantCulture);
+        var raw = $"{TerritoryId}:{MapId}:{x}:{y}:{Name}";
         return Convert.ToBase64String(Encoding.UTF8.GetBytes(raw));
     }
 
-    public static bool TryParseCode(string code, out WorldArea? location)
+    public static bool TryParseCode(string code, out WorldArea? spot)
     {
-        location = null;
+        spot = null;
 
         try
         {
             var raw = Encoding.UTF8.GetString(Convert.FromBase64String(code.Trim()));
-            var parts = raw.Split(':');
+            var parts = raw.Split(':', 5);
 
-            if (parts.Length != 3
-                || !int.TryParse(parts[1], out var xcord)
-                || !int.TryParse(parts[2], out var ycord))
+            if (parts.Length != 5
+                || !uint.TryParse(parts[0], out var territoryId)
+                || !uint.TryParse(parts[1], out var mapId)
+                || !float.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+                || !float.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out var y))
             {
                 return false;
             }
 
-            location = new WorldArea
+            spot = new WorldArea
             {
-                Description = parts[0],
-                xCord = xcord,
-                yCord = ycord,
+                Name = parts[4],
+                TerritoryId = territoryId,
+                MapId = mapId,
+                X = x,
+                Y = y,
             };
             return true;
         }
