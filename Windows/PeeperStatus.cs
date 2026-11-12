@@ -15,11 +15,14 @@ namespace UselessPlayerInfo.Windows;
 public class PeeperStatus : ThemedWindow
 {
     private const byte DetrimentalCategory = 2;
+    private const long MoodlesRefreshMs = 500;
     private static readonly Vector2 IconSize = new(24, 32);
 
     private string name = "";
     private uint homeWorldId;
     private string homeWorld = "";
+    private List<MoodlesIpc.Moodle> moodles = [];
+    private long moodlesAt;
 
     public PeeperStatus()
         : base("Useless Status Effects###UselessPeeperStatus", ImGuiWindowFlags.NoFocusOnAppearing)
@@ -39,6 +42,8 @@ public class PeeperStatus : ThemedWindow
         homeWorldId = watcher.HomeWorldId;
         homeWorld = watcher.HomeWorld;
         WindowName = $"{name} - Status Effects###UselessPeeperStatus";
+        moodles = [];
+        moodlesAt = 0;
         IsOpen = true;
     }
 
@@ -53,7 +58,19 @@ public class PeeperStatus : ThemedWindow
             return;
         }
 
+        var now = Environment.TickCount64;
+        if (now - moodlesAt >= MoodlesRefreshMs)
+        {
+            moodlesAt = now;
+            moodles = MoodlesIpc.Read(player);
+        }
+
         var effects = Read(player);
+        foreach (var moodle in moodles)
+        {
+            effects.Add(new Effect(moodle.Title, moodle.Description, moodle.Icon, moodle.Stacks, moodle.Remaining, moodle.Negative, true, moodle.Applier));
+        }
+
         if (effects.Count == 0)
         {
             ImGui.TextDisabled("No status effects.");
@@ -104,6 +121,16 @@ public class PeeperStatus : ThemedWindow
                 ImGui.TextDisabled(FormatTime(effect.Remaining));
             }
 
+            if (effect.IsMoodle)
+            {
+                ImGui.SameLine();
+                ImGui.TextDisabled("Moodle");
+                if (effect.Applier.Length > 0 && ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip($"Applied by {effect.Applier}");
+                }
+            }
+
             if (effect.Description.Length > 0)
             {
                 using (ImRaii.PushColor(ImGuiCol.Text, ImGui.GetStyle().Colors[(int)ImGuiCol.TextDisabled]))
@@ -151,11 +178,13 @@ public class PeeperStatus : ThemedWindow
                 stacks > 1 ? row.Icon + (uint)stacks - 1 : row.Icon,
                 stacks,
                 status.RemainingTime,
-                row.StatusCategory == DetrimentalCategory));
+                row.StatusCategory == DetrimentalCategory,
+                false,
+                string.Empty));
         }
 
         return effects;
     }
 
-    private readonly record struct Effect(string Name, string Description, uint Icon, int Stacks, float Remaining, bool Detrimental);
+    private readonly record struct Effect(string Name, string Description, uint Icon, int Stacks, float Remaining, bool Detrimental, bool IsMoodle, string Applier);
 }
